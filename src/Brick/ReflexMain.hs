@@ -27,6 +27,8 @@ import           Brick.Types                      ( Widget
                                                   , Extent
                                                   )
 import           Brick.Types.Internal             ( RenderState(..)
+                                                  , observedNamesL
+                                                  , clickableNamesL
                                                   )
 import           Brick.Widgets.Internal           ( renderFinal
                                                   )
@@ -44,7 +46,7 @@ import           Data.Functor
 import           Control.Concurrent
 import           Control.Exception                (finally)
 import           Data.Monoid
-import           Lens.Micro                       ((^.), (<&>))
+import           Lens.Micro                       ((^.), (<&>), (&), (.~))
 import           Data.Align
 import           Data.These
 import           Data.IORef
@@ -336,7 +338,12 @@ render
 render vty widgetStack chooseCursor attrMapCur rs = do
   sz <- displayBounds $ outputIface vty
   let (newRS, pic, theCursor, exts) =
-        renderFinal attrMapCur widgetStack sz chooseCursor rs
+        renderFinal
+          attrMapCur
+          widgetStack
+          sz
+          chooseCursor
+          (rs & observedNamesL .~ S.empty & clickableNamesL .~ mempty)
       picWithCursor = case theCursor of
         Nothing  -> pic { picCursor = NoCursor }
         Just loc -> pic
