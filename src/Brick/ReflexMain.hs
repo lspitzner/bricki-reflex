@@ -27,6 +27,8 @@ import           Brick.Types                      ( Widget
                                                   , Extent
                                                   )
 import           Brick.Types.Internal             ( RenderState(..)
+                                                  , observedNamesL
+                                                  , clickableNamesL
                                                   )
 import           Brick.Widgets.Internal           ( renderFinal
                                                   )
@@ -44,7 +46,7 @@ import           Data.Functor
 import           Control.Concurrent
 import           Control.Exception                (finally)
 import           Data.Monoid
-import           Lens.Micro                       ((^.), (<&>))
+import           Lens.Micro                       ((^.), (<&>), (&), (.~))
 import           Data.Align
 import           Data.These
 import           Data.IORef
@@ -157,37 +159,51 @@ brickWrapper shouldHaltE widgetDyn cursorDyn attrDyn = do
             $ ((io >>= resultH) `finally` restartH ())
         return resultEvent
 
+  rsRef <- liftIO $ newIORef initialRS
+
+  let startOrSuspend :: These () () -> Maybe (Vty, IO ()) -> R.PushM t (Maybe (Vty, IO ()))
+      startOrSuspend = \case
+        This{} -> \_ -> do
+          widgetStack  <- R.sample $ R.current widgetDyn
+          chooseCursor <- R.sample $ R.current cursorDyn
+          attrs        <- R.sample $ R.current attrDyn
+          vty <- liftIO $ do
+            x <- mkVty defaultConfig
+            return x
+          liftIO $ do
+            renderState <- readIORef rsRef
+            (renderState', _) <-
+              render vty widgetStack chooseCursor attrs renderState
+            writeIORef rsRef renderState'
+            
+          let loop = forever $ do
+                ev <- atomically
+                  (readTChan $ _eventChannel $ inputIface vty)
+                case ev of
+                  (EvResize _ _) ->
+                    eventH
+                      .   Just
+                      .   (\(w, h) -> EvResize w h)
+                      =<< (displayBounds $ outputIface vty)
+                  _ -> eventH $ Just ev
+          pumpTId <- liftIO $ forkIO $ loop
+          liftIO . void . forkIO . void $ eventH Nothing
+          let stopper = do
+                killThread pumpTId
+                shutdown vty
+          return $ pure (vty, stopper)
+        That{} -> \mState -> do
+          liftIO $ mState `forM_` snd
+          return Nothing
+        These{} ->
+          error "brick internal error: simultaneous startup/suspend"
+
   initStateDyn <- do
     let e1 = startupEvent <> restartEvent
         e2 = suspendEvent
     R.foldDynM id Nothing
       $   align e1 (R.leftmost [e2 $> (), shouldHaltE])
-      <&> \case
-            This{} -> \_ -> liftIO $ do
-              vty <- liftIO $ do
-                x <- mkVty defaultConfig
-                return x
-              let loop = forever $ do
-                    ev <- atomically
-                      (readTChan $ _eventChannel $ inputIface vty)
-                    case ev of
-                      (EvResize _ _) ->
-                        eventH
-                          .   Just
-                          .   (\(w, h) -> EvResize w h)
-                          =<< (displayBounds $ outputIface vty)
-                      _ -> eventH $ Just ev
-              pumpTId <- liftIO $ forkIO $ loop
-              void $ forkIO $ void $ eventH $ Nothing
-              let stopper = do
-                    killThread pumpTId
-                    shutdown vty
-              return $ pure (vty, stopper)
-            That{} -> \mState -> do
-              liftIO $ mState `forM_` snd
-              return Nothing
-            These{} ->
-              error "brick internal error: simultaneous startup/suspend"
+      <&> startOrSuspend
 
   -- using push does not work. Don't know why. Probably not supposed to work.
   -- rec renderStateB <- R.hold initialRS renderStateE
@@ -208,8 +224,6 @@ brickWrapper shouldHaltE widgetDyn cursorDyn attrDyn = do
   --           ]
   -- 
   -- return ()
-
-  rsRef <- liftIO $ newIORef initialRS
 
   RH.performEvent_ $ shouldHaltE <&> \() -> liftIO $ void $ shutdownH ()
 
@@ -336,7 +350,12 @@ render
 render vty widgetStack chooseCursor attrMapCur rs = do
   sz <- displayBounds $ outputIface vty
   let (newRS, pic, theCursor, exts) =
-        renderFinal attrMapCur widgetStack sz chooseCursor rs
+        renderFinal
+          attrMapCur
+          widgetStack
+          sz
+          chooseCursor
+          (rs & observedNamesL .~ S.empty & clickableNamesL .~ mempty)
       picWithCursor = case theCursor of
         Nothing  -> pic { picCursor = NoCursor }
         Just loc -> pic
